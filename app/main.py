@@ -124,25 +124,25 @@ async def _create_document_stub(user_id: str, title: str) -> Optional[str]:
         return None
 
 async def _save_quiz(user_id: str, payload: Dict[str, Any]) -> bool:
+    """
+    Save a quiz ONLY. Do NOT create a document stub.
+    If a valid doc_id is provided (or resolvable), we link it; otherwise we save the quiz without doc_id.
+    """
+    # 1) Try to use the provided doc_id/document_id
     doc_id = payload.get("document_id") or payload.get("doc_id")
     if not _is_uuid(doc_id):
+        # 2) (Optional) try to link to an existing document by title — but DO NOT create one
         title = payload.get("title") or "Untitled"
         found = await _get_recent_document_id_by_title(user_id, title)
-        if found:
-            doc_id = found
-        else:
-            created = await _create_document_stub(user_id, title)
-            doc_id = created if _is_uuid(created) else None
+        doc_id = found if _is_uuid(found) else None
 
-    if not _is_uuid(doc_id):
-        logger.warning("[postsave] quiz: could not resolve a UUID doc_id; skipping save")
-        return False
-
+    # Build quiz_json string from payload
     quiz_json_str = (
         payload.get("quiz_json")
         if isinstance(payload.get("quiz_json"), str)
         else json.dumps(payload.get("quiz") or {"questions": []}, ensure_ascii=False)
     )
+
     try:
         nq = payload.get("num_questions")
         if not isinstance(nq, int):
@@ -150,13 +150,15 @@ async def _save_quiz(user_id: str, payload: Dict[str, Any]) -> bool:
     except Exception:
         nq = None
 
-    body = {
+    body: Dict[str, Any] = {
         "user_id": user_id,
-        "doc_id": doc_id,
         "title": payload.get("title") or "Untitled",
         "quiz_json": quiz_json_str,
         "num_questions": nq,
     }
+    # Only include doc_id if we truly have a valid UUID
+    if _is_uuid(doc_id):
+        body["doc_id"] = doc_id
 
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.post(
@@ -164,10 +166,12 @@ async def _save_quiz(user_id: str, payload: Dict[str, Any]) -> bool:
             headers={**SB_HEADERS, "Prefer": "return=minimal"},
             json=body,
         )
+
     ok = r.status_code < 300
     if not ok:
         logger.warning(f"[postsave] quizzes insert failed: {r.status_code} {r.text}")
     return ok
+
 
 # ---------- middleware: post-save ----------
 @app.middleware("http")
